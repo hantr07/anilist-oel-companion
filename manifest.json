@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "AniList OEL Companion (MangaDex)",
+  "version": "1.4.1",
+  "description": "Adds a personal, local-only OEL/manhwa/manhua library to anilist.co, sourced from MangaDex. Doesn't touch your real AniList account or data.",
+  "permissions": ["storage", "declarativeNetRequest"],
+  "host_permissions": [
+    "https://api.mangadex.org/*",
+    "https://uploads.mangadex.org/*",
+    "https://anilist.co/*",
+    "https://api.comick.io/*",
+    "https://api.mangabaka.dev/*"
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "mangadex_referer",
+        "enabled": true,
+        "path": "dnr_rules.json"
+      }
+    ]
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://anilist.co/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
