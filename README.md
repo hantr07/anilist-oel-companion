@@ -15,6 +15,10 @@ account, lists, and data are never read, written, or modified.
 - Click a feed entry's poster or title to edit it in place
 - Auto-fetches missing covers (MangaDex → Comick → MangaBaka)
 
+## Screenshots
+
+<img width="754" height="612" alt="edit" src="https://github.com/user-attachments/assets/eef8b6e3-f32e-4341-83f4-16a3283a2a0e" />
+
 ## Install
 
 1. Download the latest `oel-companion.zip` from Releases
