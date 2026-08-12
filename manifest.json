@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "AniList OEL Companion (MangaDex)",
-  "version": "1.4.1",
+  "name": "OEL Companion for AniList",
+  "version": "1.4.2",
   "description": "Adds a personal, local-only OEL/manhwa/manhua library to anilist.co, sourced from MangaDex. Doesn't touch your real AniList account or data.",
   "permissions": ["storage", "declarativeNetRequest"],
   "host_permissions": [
