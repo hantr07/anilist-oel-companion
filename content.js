@@ -30,7 +30,7 @@
       if (chrome.runtime.lastError) console.error("[OEL Companion] storage error:", chrome.runtime.lastError);
     });
     if (typeof scheduleInjectIntoFeed === "function") scheduleInjectIntoFeed();
-    if (!opts || !opts.skipBackup) writeAutoBackup(list);
+    if (backupEnabled && (!opts || !opts.skipBackup)) writeAutoBackup(list);
   }
 
   let library = await loadLibrary();
@@ -45,8 +45,10 @@
   const BAK_STORE = "handles";
   const BAK_KEY = "backupDir";
   const BAK_BASENAME = "oel-companion-library";
+  const BAK_ENABLED_KEY = "oel_companion_backup_enabled";
 
-  let backupDir = null; // live handle kept for this session
+  let backupDir = null;      // live handle kept for this session
+  let backupEnabled = false; // user's last intent, persisted
 
   function bakOpenDb() {
     return new Promise((resolve, reject) => {
@@ -83,6 +85,18 @@
       tx.oncomplete = resolve;
       tx.onerror = () => reject(tx.error);
     });
+  }
+
+  function bakGetEnabled() {
+    return new Promise((resolve) => {
+      chrome.storage.local.get([BAK_ENABLED_KEY], (res) => {
+        resolve(res[BAK_ENABLED_KEY] === true);
+      });
+    });
+  }
+
+  function bakSetEnabled(enabled) {
+    chrome.storage.local.set({ [BAK_ENABLED_KEY]: enabled });
   }
 
   async function bakEnsure(dir) {
@@ -841,26 +855,46 @@
   });
 
   (async function initBackup() {
+    const wasEnabled = await bakGetEnabled();
     const dir = await bakGetDir();
-    if (!dir) return;
+    if (!wasEnabled || !dir) {
+      backupBtn.textContent = "Auto-backup (off)";
+      if (dir) setBakStatus("Auto-backup off");
+      else setBakStatus("Auto-backup off");
+      return;
+    }
     const ok = await bakEnsure(dir);
     if (ok) {
       backupDir = ok;
+      backupEnabled = true;
       backupBtn.textContent = "Auto-backup on";
-      setBakStatus(`Auto-backup → ${dir.name}`);
+      setBakStatus(`Auto-backup → ${ok.name}`);
     } else {
-      backupBtn.textContent = "Auto-backup (grant)";
+      backupEnabled = false;
+      backupBtn.textContent = "Auto-backup (off)";
+      setBakStatus("Auto-backup off");
     }
   })();
 
   backupBtn.addEventListener("click", async () => {
+    if (backupEnabled) {
+      // turning OFF
+      backupEnabled = false;
+      bakSetEnabled(false);
+      backupDir = null;
+      backupBtn.textContent = "Auto-backup (off)";
+      setBakStatus("Auto-backup off");
+      return;
+    }
+    // turning ON
     try {
       let dir = backupDir || await bakGetDir();
       if (!dir) dir = await bakRequestFolder(); // first time: pick a folder
       else dir = await bakEnsure(dir);          // later: just re-grant the same folder
       if (!dir) throw new Error("not granted");
       backupDir = dir;
-      await bakPutDir(dir);
+      backupEnabled = true;
+      bakSetEnabled(true);
       backupBtn.textContent = "Auto-backup on";
       writeAutoBackup(library);
       setBakStatus(`Auto-backup → ${dir.name}`);
