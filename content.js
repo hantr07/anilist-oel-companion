@@ -30,9 +30,95 @@
       if (chrome.runtime.lastError) console.error("[OEL Companion] storage error:", chrome.runtime.lastError);
     });
     if (typeof scheduleInjectIntoFeed === "function") scheduleInjectIntoFeed();
+    writeAutoBackup(list);
   }
 
   let library = await loadLibrary();
+
+  /* ------------------------------------------------------------------ *
+   *  Backup — persists an optional directory handle in IndexedDB (keyed to
+   *  the site, so it survives extension uninstall) and writes a single
+   *  always-current oel-companion-library.json into a user-chosen folder.
+   * ------------------------------------------------------------------ */
+  const BAK_DB = "oel_companion_backup";
+  const BAK_STORE = "handles";
+  const BAK_KEY = "backupDir";
+  const BAK_FILE = "oel-companion-library.json";
+
+  function bakOpenDb() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(BAK_DB, 1);
+      req.onupgradeneeded = () => {
+        if (!req.result.objectStoreNames.contains(BAK_STORE)) {
+          req.result.createObjectStore(BAK_STORE);
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async function bakGetDir() {
+    try {
+      const db = await bakOpenDb();
+      return await new Promise((resolve) => {
+        const tx = db.transaction(BAK_STORE, "readonly");
+        const req = tx.objectStore(BAK_STORE).get(BAK_KEY);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => resolve(null);
+      });
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function bakPutDir(dir) {
+    const db = await bakOpenDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(BAK_STORE, "readwrite");
+      tx.objectStore(BAK_STORE).put(dir, BAK_KEY);
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  async function bakRestore() {
+    const dir = await bakGetDir();
+    if (!dir) return null;
+    try {
+      if (dir.queryPermission && (await dir.queryPermission({ mode: "readwrite" })) === "prompt") {
+        const p = await dir.requestPermission({ mode: "readwrite" });
+        if (p !== "granted") return null;
+      }
+      return dir;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function bakRequestFolder() {
+    if (typeof window.showDirectoryPicker !== "function") {
+      throw new Error("This browser needs File System Access (Chrome 86+).");
+    }
+    const dir = await window.showDirectoryPicker({ mode: "readwrite" });
+    const p = await dir.requestPermission({ mode: "readwrite" });
+    if (p !== "granted") throw new Error("Permission not granted.");
+    await bakPutDir(dir);
+    return dir;
+  }
+
+  async function writeAutoBackup(list) {
+    try {
+      const dir = await bakGetDir();
+      if (!dir || dir.permission !== "granted") return;
+      const fh = await dir.getFileHandle(BAK_FILE, { create: true });
+      const writable = await fh.createWritable();
+      await writable.write(JSON.stringify(list, null, 2));
+      await writable.close();
+    } catch (e) {
+      console.error("[OEL Companion] auto-backup failed:", e);
+    }
+  }
 
   /* ------------------------------------------------------------------ *
    *  Progress tracking (local, per-entry)
@@ -429,12 +515,8 @@
     #oel-inline-card .oel-stepper input[type="number"]::-webkit-outer-spin-button {
       -webkit-appearance: none; margin: 0;
     }
-    #oel-inline-card .oel-debug-btn { opacity: 0.5; font-size: 11px; }
-    #oel-inline-card .oel-debug {
-      font-size: 11px; opacity: 0.85; white-space: pre-wrap; word-break: break-all;
-      background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.08);
-      border-radius: 6px; padding: 8px; margin-top: 8px; display: none;
-    }
+    #oel-inline-card .oel-backup-row { border-top: 1px dashed rgba(255,255,255,0.1); padding-top: 8px; }
+    #oel-inline-card .oel-bak-status { font-size: 11px; opacity: 0.7; margin-left: 4px; }
     [data-oel-fake] { }
   `;
   document.documentElement.appendChild(style);
@@ -453,9 +535,14 @@
       <div class="oel-search-row">
         <input type="text" id="oel-search-input" placeholder="Search OEL / manhwa / manhua on MangaDex…" />
         <button class="oel-btn" id="oel-search-btn">Search</button>
-        <button class="oel-btn oel-debug-btn" id="oel-debug-btn" title="Show debug info">Debug</button>
       </div>
-      <pre class="oel-debug" id="oel-debug-out"></pre>
+      <div class="oel-search-row oel-backup-row">
+        <button class="oel-btn" id="oel-export-btn" title="Download your library as a JSON file">Export</button>
+        <button class="oel-btn" id="oel-import-btn" title="Load a library from a JSON file">Import</button>
+        <button class="oel-btn" id="oel-backup-btn" title="Save every change to a folder on this PC">Auto-backup</button>
+        <input type="file" id="oel-import-file" accept=".json,application/json" style="display:none" />
+        <span class="oel-bak-status" id="oel-bak-status"></span>
+      </div>
       <div id="oel-results"></div>
       <div class="oel-section-label">My titles</div>
       <div id="oel-mylist"></div>
@@ -652,56 +739,92 @@
   renderMyList();
 
   /* ------------------------------------------------------------------ *
-   *  Debug helper — dumps the live state of the library, feed detection,
-   *  and injected entries so issues can be diagnosed from the page itself.
+   *  Backup UI — export / import / auto-backup wiring.
    * ------------------------------------------------------------------ */
-  const debugBtn = card.querySelector("#oel-debug-btn");
-  const debugOut = card.querySelector("#oel-debug-out");
+  const exportBtn = card.querySelector("#oel-export-btn");
+  const importBtn = card.querySelector("#oel-import-btn");
+  const importFile = card.querySelector("#oel-import-file");
+  const backupBtn = card.querySelector("#oel-backup-btn");
+  const bakStatus = card.querySelector("#oel-bak-status");
 
-  function debugReport() {
-    const lines = [];
-    lines.push(`Library (${library.length}):`);
-    library.forEach((s) => {
-      lines.push(`  - ${s.title || "(untitled)"} [${s.id}]: cover=${s.cover || "EMPTY"}`);
-    });
-    const found = findFeed();
-    lines.push(
-      `Feed: ${found ? "OK (list=" + found.list.tagName + ", sample=" + found.sample.tagName + ")" : "NOT FOUND"}`
-    );
-    const fakes = document.querySelectorAll("[data-oel-fake]");
-    lines.push(`Fake entries in DOM: ${fakes.length}`);
-    fakes.forEach((f, i) => {
-      const poster = f.querySelector("[data-oel-poster]");
-      const img = poster || f.querySelector("img");
-      if (img) {
-        const r = img.getBoundingClientRect();
-        const cs = getComputedStyle(img);
-        lines.push(
-          `  fake#${i}: ${img.tagName} src=${String(img.currentSrc || img.src || "").slice(0, 100)}`
-        );
-        lines.push(
-          `           rect=${Math.round(r.width)}x${Math.round(r.height)} complete=${img.complete} natural=${img.naturalWidth}x${img.naturalHeight}`
-        );
-        lines.push(
-          `           display=${cs.display} visibility=${cs.visibility} opacity=${cs.opacity} offsetParent=${img.offsetParent ? "yes" : "no"}`
-        );
-        lines.push(
-          `           class="${img.className || ""}" parent=<${img.parentElement.tagName} class="${img.parentElement.className || ""}">`
-        );
-      } else {
-        lines.push(`  fake#${i}: no image found`);
-      }
-      lines.push(`           coverAnchor=${f.querySelector("a[data-oel-cover]") ? "yes" : "no"} titleLink=${f.querySelector("a[data-oel-id]") ? "yes" : "no"}`);
-    });
-    return lines.join("\n");
+  let bakStatusTimer = null;
+  function setBakStatus(msg) {
+    bakStatus.textContent = msg;
+    clearTimeout(bakStatusTimer);
+    bakStatusTimer = setTimeout(() => { bakStatus.textContent = ""; }, 4000);
   }
 
-  debugBtn.addEventListener("click", () => {
-    if (debugOut.style.display === "block") {
-      debugOut.style.display = "none";
-    } else {
-      debugOut.textContent = debugReport();
-      debugOut.style.display = "block";
+  exportBtn.addEventListener("click", () => {
+    const blob = new Blob([JSON.stringify(library, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "oel-companion-library.json";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    setBakStatus(`Exported ${library.length} titles`);
+  });
+
+  importBtn.addEventListener("click", () => importFile.click());
+
+  importFile.addEventListener("change", () => {
+    const file = importFile.files && importFile.files[0];
+    importFile.value = "";
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const incoming = JSON.parse(reader.result);
+        if (!Array.isArray(incoming)) throw new Error("not an array of entries");
+        const byId = new Map(library.map((s) => [String(s.id), s]));
+        let added = 0;
+        let updated = 0;
+        incoming.forEach((item) => {
+          if (!item || item.id === undefined || item.title === undefined) return;
+          const key = String(item.id);
+          const existing = byId.get(key);
+          const inTs = (item._track && item._track.updatedAt) || 0;
+          const exTs = existing && existing._track ? existing._track.updatedAt : 0;
+          if (!existing) {
+            byId.set(key, item);
+            added++;
+          } else if (inTs >= exTs) {
+            byId.set(key, item);
+            updated++;
+          }
+        });
+        const merged = Array.from(byId.values());
+        merged.forEach((s) => ensureTrack(s));
+        library.length = 0;
+        library.push(...merged);
+        saveLibrary(library);
+        renderMyList();
+        setBakStatus(`Imported: ${added} added, ${updated} updated`);
+      } catch (e) {
+        setBakStatus("Import failed: invalid file");
+      }
+    };
+    reader.readAsText(file);
+  });
+
+  (async function initBackup() {
+    const dir = await bakRestore();
+    if (dir) {
+      backupBtn.textContent = "Auto-backup on";
+      setBakStatus(`Auto-backup → ${dir.name}`);
+    }
+  })();
+
+  backupBtn.addEventListener("click", async () => {
+    try {
+      const dir = await bakRequestFolder();
+      backupBtn.textContent = "Auto-backup on";
+      writeAutoBackup(library);
+      setBakStatus(`Auto-backup → ${dir.name}`);
+    } catch (e) {
+      setBakStatus("Auto-backup not enabled");
     }
   });
 
