@@ -44,7 +44,7 @@
   const BAK_DB = "oel_companion_backup";
   const BAK_STORE = "handles";
   const BAK_KEY = "backupDir";
-  const BAK_FILE = "oel-companion-library.json";
+  const BAK_BASENAME = "oel-companion-library";
 
   let backupDir = null; // live handle kept for this session
 
@@ -120,32 +120,35 @@
     return ok;
   }
 
-  async function writeAutoBackup(list, opts) {
+  async function writeAutoBackup(list) {
     let dir = backupDir || await bakGetDir();
     dir = await bakEnsure(dir);
     if (!dir) return;
     try {
-      if (opts && opts.onlyIfMissing) {
-        try {
-          await dir.getFileHandle(BAK_FILE); // throws NotFoundError if absent
-        } catch (e) {
-          if (e && e.name !== "NotFoundError") throw e;
-          await writeBackupFile(dir, list); // first-ever backup — create baseline
-        }
-        return; // file exists → never overwrite the pre-delete backup on load
-      }
-      await writeBackupFile(dir, list);
-      console.log("[OEL Companion] auto-backup written to disk");
+      const name = await writeBackupFile(dir, list);
+      console.log("[OEL Companion] auto-backup snapshot written:", name);
     } catch (e) {
       console.error("[OEL Companion] auto-backup failed:", e);
     }
   }
 
+  function bakTimestamp() {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, "0");
+    return (
+      `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}` +
+      `_${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}` +
+      `-${String(d.getMilliseconds()).padStart(3, "0")}`
+    );
+  }
+
   async function writeBackupFile(dir, list) {
-    const fh = await dir.getFileHandle(BAK_FILE, { create: true });
+    const name = `${BAK_BASENAME}-${bakTimestamp()}.json`;
+    const fh = await dir.getFileHandle(name, { create: true });
     const writable = await fh.createWritable();
     await writable.write(JSON.stringify(list, null, 2));
     await writable.close();
+    return name;
   }
 
   /* ------------------------------------------------------------------ *
@@ -844,7 +847,6 @@
     if (ok) {
       backupDir = ok;
       backupBtn.textContent = "Auto-backup on";
-      writeAutoBackup(library, { onlyIfMissing: true }); // baseline only if none exists
       setBakStatus(`Auto-backup → ${dir.name}`);
     } else {
       backupBtn.textContent = "Auto-backup (grant)";
