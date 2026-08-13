@@ -878,25 +878,23 @@
 
   backupBtn.addEventListener("click", async () => {
     if (backupEnabled) {
-      // turning OFF
+      // turning OFF — keep the handle so re-enabling never re-asks for the folder
       backupEnabled = false;
       bakSetEnabled(false);
-      backupDir = null;
       backupBtn.textContent = "Auto-backup (off)";
       setBakStatus("Auto-backup off");
       return;
     }
-    // turning ON
+    // turning ON — reuse the stored folder; only pick a new one if none exists
     try {
       let dir = backupDir || await bakGetDir();
-      if (!dir) dir = await bakRequestFolder(); // first time: pick a folder
-      else dir = await bakEnsure(dir);          // later: just re-grant the same folder
+      if (!dir) dir = await bakRequestFolder();
+      else dir = await bakEnsure(dir);
       if (!dir) throw new Error("not granted");
       backupDir = dir;
       backupEnabled = true;
       bakSetEnabled(true);
       backupBtn.textContent = "Auto-backup on";
-      writeAutoBackup(library);
       setBakStatus(`Auto-backup → ${dir.name}`);
     } catch (e) {
       setBakStatus("Auto-backup not enabled");
