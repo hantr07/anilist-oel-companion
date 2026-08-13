@@ -25,12 +25,12 @@
     });
   }
 
-  function saveLibrary(list) {
+  function saveLibrary(list, opts) {
     chrome.storage.local.set({ [STORAGE_KEY]: JSON.stringify(list) }, () => {
       if (chrome.runtime.lastError) console.error("[OEL Companion] storage error:", chrome.runtime.lastError);
     });
     if (typeof scheduleInjectIntoFeed === "function") scheduleInjectIntoFeed();
-    writeAutoBackup(list);
+    if (!opts || !opts.skipBackup) writeAutoBackup(list);
   }
 
   let library = await loadLibrary();
@@ -696,7 +696,7 @@
 
     if (action === "remove") {
       library = library.filter((s) => String(s.id) !== String(id));
-      saveLibrary(library);
+      saveLibrary(library, { skipBackup: true });
       renderResults([...lastResultsMap.values()]);
       renderMyList();
       return;
