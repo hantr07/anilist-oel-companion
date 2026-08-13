@@ -36,14 +36,17 @@
   let library = await loadLibrary();
 
   /* ------------------------------------------------------------------ *
-   *  Backup — persists an optional directory handle in IndexedDB (keyed to
-   *  the site, so it survives extension uninstall) and writes a single
-   *  always-current oel-companion-library.json into a user-chosen folder.
+   *  Backup — persists the directory handle in IndexedDB (survives
+   *  uninstall) and writes oel-companion-library.json on every change.
+   *  Chrome persists the folder permission per-site, so once granted it
+   *  stays enabled automatically without re-picking the folder.
    * ------------------------------------------------------------------ */
   const BAK_DB = "oel_companion_backup";
   const BAK_STORE = "handles";
   const BAK_KEY = "backupDir";
   const BAK_FILE = "oel-companion-library.json";
+
+  let backupDir = null; // live handle kept for this session
 
   function bakOpenDb() {
     return new Promise((resolve, reject) => {
@@ -82,15 +85,24 @@
     });
   }
 
-  async function bakRestore() {
-    const dir = await bakGetDir();
+  async function bakEnsure(dir) {
     if (!dir) return null;
     try {
-      if (dir.queryPermission && (await dir.queryPermission({ mode: "readwrite" })) === "prompt") {
-        const p = await dir.requestPermission({ mode: "readwrite" });
-        if (p !== "granted") return null;
+      let p = "prompt";
+      if (dir.queryPermission) {
+        p = await dir.queryPermission({ mode: "readwrite" });
+      } else {
+        p = dir.permission;
       }
-      return dir;
+      // "prompt" usually means granted earlier this session; ask to confirm.
+      if (p !== "granted" && dir.requestPermission) {
+        try {
+          p = await dir.requestPermission({ mode: "readwrite" });
+        } catch (e) {
+          p = "denied";
+        }
+      }
+      return p === "granted" ? dir : null;
     } catch (e) {
       return null;
     }
@@ -101,20 +113,23 @@
       throw new Error("This browser needs File System Access (Chrome 86+).");
     }
     const dir = await window.showDirectoryPicker({ mode: "readwrite" });
-    const p = await dir.requestPermission({ mode: "readwrite" });
-    if (p !== "granted") throw new Error("Permission not granted.");
-    await bakPutDir(dir);
-    return dir;
+    const ok = await bakEnsure(dir);
+    if (!ok) throw new Error("Permission not granted.");
+    backupDir = ok;
+    await bakPutDir(ok);
+    return ok;
   }
 
   async function writeAutoBackup(list) {
+    let dir = backupDir || await bakGetDir();
+    dir = await bakEnsure(dir);
+    if (!dir) return;
     try {
-      const dir = await bakGetDir();
-      if (!dir || dir.permission !== "granted") return;
       const fh = await dir.getFileHandle(BAK_FILE, { create: true });
       const writable = await fh.createWritable();
       await writable.write(JSON.stringify(list, null, 2));
       await writable.close();
+      console.log("[OEL Companion] auto-backup written to disk");
     } catch (e) {
       console.error("[OEL Companion] auto-backup failed:", e);
     }
@@ -810,16 +825,27 @@
   });
 
   (async function initBackup() {
-    const dir = await bakRestore();
-    if (dir) {
+    const dir = await bakGetDir();
+    if (!dir) return;
+    const ok = await bakEnsure(dir);
+    if (ok) {
+      backupDir = ok;
       backupBtn.textContent = "Auto-backup on";
+      writeAutoBackup(library); // baseline file right away
       setBakStatus(`Auto-backup → ${dir.name}`);
+    } else {
+      backupBtn.textContent = "Auto-backup (grant)";
     }
   })();
 
   backupBtn.addEventListener("click", async () => {
     try {
-      const dir = await bakRequestFolder();
+      let dir = backupDir || await bakGetDir();
+      if (!dir) dir = await bakRequestFolder(); // first time: pick a folder
+      else dir = await bakEnsure(dir);          // later: just re-grant the same folder
+      if (!dir) throw new Error("not granted");
+      backupDir = dir;
+      await bakPutDir(dir);
       backupBtn.textContent = "Auto-backup on";
       writeAutoBackup(library);
       setBakStatus(`Auto-backup → ${dir.name}`);
