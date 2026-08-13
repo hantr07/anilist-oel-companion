@@ -120,19 +120,32 @@
     return ok;
   }
 
-  async function writeAutoBackup(list) {
+  async function writeAutoBackup(list, opts) {
     let dir = backupDir || await bakGetDir();
     dir = await bakEnsure(dir);
     if (!dir) return;
     try {
-      const fh = await dir.getFileHandle(BAK_FILE, { create: true });
-      const writable = await fh.createWritable();
-      await writable.write(JSON.stringify(list, null, 2));
-      await writable.close();
+      if (opts && opts.onlyIfMissing) {
+        try {
+          await dir.getFileHandle(BAK_FILE); // throws NotFoundError if absent
+        } catch (e) {
+          if (e && e.name !== "NotFoundError") throw e;
+          await writeBackupFile(dir, list); // first-ever backup — create baseline
+        }
+        return; // file exists → never overwrite the pre-delete backup on load
+      }
+      await writeBackupFile(dir, list);
       console.log("[OEL Companion] auto-backup written to disk");
     } catch (e) {
       console.error("[OEL Companion] auto-backup failed:", e);
     }
+  }
+
+  async function writeBackupFile(dir, list) {
+    const fh = await dir.getFileHandle(BAK_FILE, { create: true });
+    const writable = await fh.createWritable();
+    await writable.write(JSON.stringify(list, null, 2));
+    await writable.close();
   }
 
   /* ------------------------------------------------------------------ *
@@ -831,7 +844,7 @@
     if (ok) {
       backupDir = ok;
       backupBtn.textContent = "Auto-backup on";
-      writeAutoBackup(library); // baseline file right away
+      writeAutoBackup(library, { onlyIfMissing: true }); // baseline only if none exists
       setBakStatus(`Auto-backup → ${dir.name}`);
     } else {
       backupBtn.textContent = "Auto-backup (grant)";
