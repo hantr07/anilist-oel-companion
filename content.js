@@ -885,11 +885,9 @@
       setBakStatus("Auto-backup off");
       return;
     }
-    // turning ON — reuse the stored folder; only pick a new one if none exists
+    // turning ON — always pick the folder so you control where backups go
     try {
-      let dir = backupDir || await bakGetDir();
-      if (!dir) dir = await bakRequestFolder();
-      else dir = await bakEnsure(dir);
+      const dir = await bakRequestFolder();
       if (!dir) throw new Error("not granted");
       backupDir = dir;
       backupEnabled = true;
