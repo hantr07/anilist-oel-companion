@@ -1,14 +1,15 @@
 {
   "manifest_version": 3,
   "name": "OEL Companion for AniList",
-  "version": "1.2.7",
+  "version": "1.3.0",
   "description": "Adds a personal, local-only OEL/manhwa/manhua library to anilist.co, sourced from MangaDex. Doesn't touch your real AniList account or data.",
-  "permissions": ["storage", "declarativeNetRequest"],
+  "permissions": ["storage", "declarativeNetRequest", "unlimitedStorage"],
   "host_permissions": [
     "https://api.mangadex.org/*",
     "https://uploads.mangadex.org/*",
+    "https://meo.comick.pictures/*",
     "https://anilist.co/*",
-    "https://api.comick.io/*",
+    "https://comick-api-proxy.notaspider.dev/*",
     "https://api.mangabaka.dev/*"
   ],
   "declarative_net_request": {

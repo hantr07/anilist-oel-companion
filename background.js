@@ -7,8 +7,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || msg.type !== "OEL_FETCH") return false;
 
   (async () => {
+    const controller = new AbortController();
+    const timeout = msg.binary ? 25000 : 20000;
+    const timer = setTimeout(() => controller.abort(), timeout);
     try {
-      const res = await fetch(msg.url, { method: "GET", headers: msg.headers || {} });
+      const res = await fetch(msg.url, {
+        method: "GET",
+        headers: msg.headers || {},
+        signal: controller.signal,
+      });
       if (msg.binary) {
         const buf = await res.arrayBuffer();
         const bytes = new Uint8Array(buf);
@@ -29,6 +36,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
     } catch (e) {
       sendResponse({ ok: false, error: String((e && e.message) || e) });
+    } finally {
+      clearTimeout(timer);
     }
   })();
 

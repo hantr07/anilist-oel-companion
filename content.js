@@ -12,6 +12,7 @@
    *  Storage (chrome.storage.local — local to you, not synced to AniList)
    * ------------------------------------------------------------------ */
   const STORAGE_KEY = "oel_companion_library_v1";
+  const ADULT_KEY = "oel_companion_include_adult";
 
   function loadLibrary() {
     return new Promise((resolve) => {
@@ -136,14 +137,32 @@
 
   async function writeAutoBackup(list) {
     let dir = backupDir || await bakGetDir();
+    if (!dir) {
+      onBackupLost("Backup folder was cleared from this browser (e.g. AniList site data). Re-enable Auto-backup to pick it again.");
+      return;
+    }
     dir = await bakEnsure(dir);
-    if (!dir) return;
+    if (!dir) {
+      onBackupLost("Auto-backup stopped: the backup folder is no longer accessible. Turn it off and on to re-pick it.");
+      return;
+    }
     try {
       const name = await writeBackupFile(dir, list);
       console.log("[OEL Companion] auto-backup snapshot written:", name);
     } catch (e) {
       console.error("[OEL Companion] auto-backup failed:", e);
+      setBakStatus("Auto-backup failed — see console");
     }
+  }
+
+  // A lost/inaccessible backup folder must not look like it's still running:
+  // flip the toggle off, persist it, and tell the user.
+  function onBackupLost(msg) {
+    console.warn("[OEL Companion]", msg);
+    backupEnabled = false;
+    bakSetEnabled(false);
+    backupBtn.textContent = "Auto-backup (off)";
+    setBakStatus(msg);
   }
 
   function bakTimestamp() {
@@ -215,34 +234,64 @@
     return usp.toString();
   }
 
+  const FETCH_TIMEOUT_MS = 20000;
+
+  // Builds an Error for messaging failures, flagging context-invalidation
+  // (extension updated/disabled while the tab was open) so callers can tell
+  // the user to refresh instead of showing a generic "search failed".
+  function oelMessagingError(lastError) {
+    const msg = (lastError && lastError.message) || "Extension messaging error";
+    const err = new Error(msg);
+    err.contextInvalidated = /Context invalidated|Extension context/i.test(msg);
+    return err;
+  }
+
+  // Guarantees a promise settles: rejects with a timeout error if the raw
+  // promise (usually a chrome.runtime.sendMessage callback, which can hang
+  // forever) doesn't resolve in time.
+  function withTimeout(promise, ms) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error("Request timed out. Check your connection and try again."));
+      }, ms || FETCH_TIMEOUT_MS);
+      promise.then(
+        (v) => { clearTimeout(timer); resolve(v); },
+        (e) => { clearTimeout(timer); reject(e); }
+      );
+    });
+  }
+
   function apiGet(path, params) {
     const qs = buildQuery(params);
     const url = API_BASE + path + (qs ? "?" + qs : "");
-    return new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage({ type: "OEL_FETCH", url }, (res) => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(`Extension messaging error: ${chrome.runtime.lastError.message}`));
-          return;
-        }
-        if (!res || !res.ok) {
-          reject(new Error((res && res.error) || `Network error contacting MangaDex. URL: ${url}`));
-          return;
-        }
-        let json;
-        try {
-          json = JSON.parse(res.text);
-        } catch (e) {
-          reject(new Error(`MangaDex returned non-JSON (HTTP ${res.status}). URL: ${url}`));
-          return;
-        }
-        if (res.status !== 200 || json.result === "error") {
-          const msg = (json && json.errors && json.errors[0] && json.errors[0].detail) || `HTTP ${res.status}`;
-          reject(new Error(`MangaDex API error: ${msg}. URL: ${url}`));
-          return;
-        }
-        resolve(json);
-      });
-    });
+    return withTimeout(
+      new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage({ type: "OEL_FETCH", url }, (res) => {
+          if (chrome.runtime.lastError) {
+            reject(oelMessagingError(chrome.runtime.lastError));
+            return;
+          }
+          if (!res || !res.ok) {
+            reject(new Error((res && res.error) || `Network error contacting MangaDex. URL: ${url}`));
+            return;
+          }
+          let json;
+          try {
+            json = JSON.parse(res.text);
+          } catch (e) {
+            reject(new Error(`MangaDex returned non-JSON (HTTP ${res.status}). URL: ${url}`));
+            return;
+          }
+          if (res.status !== 200 || json.result === "error") {
+            const msg = (json && json.errors && json.errors[0] && json.errors[0].detail) || `HTTP ${res.status}`;
+            reject(new Error(`MangaDex API error: ${msg}. URL: ${url}`));
+            return;
+          }
+          resolve(json);
+        });
+      }),
+      20000
+    );
   }
 
   function pickLocalized(obj) {
@@ -285,12 +334,17 @@
     return tagNames.some((n) => FORMAT_TAGS.includes(n)) || attrs.originalLanguage === "en";
   }
 
+  let includeAdult = false;
+
   function searchSeries(query) {
+    const ratings = includeAdult
+      ? ["safe", "suggestive", "erotica", "pornographic"]
+      : ["safe", "suggestive"];
     return apiGet("manga", {
       title: query,
       limit: 20,
       "includes[]": ["cover_art"],
-      "contentRating[]": ["safe", "suggestive", "erotica", "pornographic"],
+      "contentRating[]": ratings,
     }).then((res) => {
       const data = (res && res.data) || [];
       if (!data.length) return [];
@@ -332,41 +386,51 @@
   const coverLookupDone = new Set();
 
   function apiGetUrl(url, headers) {
-    return new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage({ type: "OEL_FETCH", url, headers }, (res) => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(`Extension messaging error: ${chrome.runtime.lastError.message}`));
-          return;
-        }
-        if (!res || !res.ok) {
-          reject(new Error((res && res.error) || `Network error. URL: ${url}`));
-          return;
-        }
-        let json;
-        try {
-          json = JSON.parse(res.text);
-        } catch (e) {
-          reject(new Error(`Non-JSON response (HTTP ${res.status}). URL: ${url}`));
-          return;
-        }
-        resolve(json);
-      });
-    });
+    return withTimeout(
+      new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage({ type: "OEL_FETCH", url, headers }, (res) => {
+          if (chrome.runtime.lastError) {
+            reject(oelMessagingError(chrome.runtime.lastError));
+            return;
+          }
+          if (!res || !res.ok) {
+            reject(new Error((res && res.error) || `Network error. URL: ${url}`));
+            return;
+          }
+          let json;
+          try {
+            json = JSON.parse(res.text);
+          } catch (e) {
+            reject(new Error(`Non-JSON response (HTTP ${res.status}). URL: ${url}`));
+            return;
+          }
+          resolve(json);
+        });
+      })
+    );
   }
 
   // Downloads an image through the extension worker (extension context sends
   // no page referrer, so it sidesteps any hotlink/CORS blocking) and returns
   // it as a data URL for embedding straight into the feed entry.
   function imageAsDataUrl(url) {
-    return new Promise((resolve) => {
-      chrome.runtime.sendMessage({ type: "OEL_FETCH", url, binary: true }, (res) => {
-        if (!res || !res.ok || !res.b64) {
-          resolve("");
-          return;
-        }
-        resolve(`data:${res.mime || "image/jpeg"};base64,${res.b64}`);
-      });
-    });
+    return withTimeout(
+      new Promise((resolve) => {
+        chrome.runtime.sendMessage({ type: "OEL_FETCH", url, binary: true }, (res) => {
+          if (chrome.runtime.lastError) {
+            console.warn("[OEL Companion] cover fetch skipped:", chrome.runtime.lastError.message);
+            resolve("");
+            return;
+          }
+          if (!res || !res.ok || !res.b64) {
+            resolve("");
+            return;
+          }
+          resolve(`data:${res.mime || "image/jpeg"};base64,${res.b64}`);
+        });
+      }),
+      25000
+    );
   }
 
   function normTitle(str) {
@@ -396,14 +460,17 @@
   }
 
   const COMICK_HEADERS = {
-    "Referer": "https://comick.io/",
+    "Referer": "https://comick.dev/",
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
   };
 
   async function fallbackCoverFromComick(title) {
-    for (const host of ["https://api.comick.io", "https://api.comick.fun"]) {
+    // Comick's own API hosts (api.comick.io / api.comick.fun) redirect or are
+    // gone; a public proxy that mirrors the same /v1.0/search schema is the
+    // live source. Tried first, MangaBaka still catches anything it misses.
+    for (const host of ["https://comick-api-proxy.notaspider.dev/api/v1.0/search"]) {
       try {
-        const json = await apiGetUrl(`${host}/v1.0/search?q=${encodeURIComponent(title)}&limit=15`, COMICK_HEADERS);
+        const json = await apiGetUrl(`${host}?q=${encodeURIComponent(title)}&limit=15`, COMICK_HEADERS);
         if (!Array.isArray(json)) continue;
         let best = null;
         let bestScore = 0;
@@ -419,7 +486,7 @@
         const b2 = best.md_covers && best.md_covers[0] && best.md_covers[0].b2key;
         if (b2) return `https://meo.comick.pictures${String(b2).startsWith("/") ? b2 : "/" + b2}`;
       } catch (e) {
-        // try the next host
+        // fall through to MangaBaka
       }
     }
     return "";
@@ -562,6 +629,9 @@
     }
     #oel-inline-card .oel-backup-row { border-top: 1px dashed rgba(255,255,255,0.1); padding-top: 8px; }
     #oel-inline-card .oel-bak-status { font-size: 11px; opacity: 0.7; margin-left: 4px; }
+    #oel-inline-card .oel-adult-row { margin-bottom: 6px; }
+    #oel-inline-card .oel-adult-toggle { font-size: 12px; opacity: 0.75; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+    #oel-inline-card .oel-adult-toggle input { accent-color: #3db4f2; cursor: pointer; }
     [data-oel-fake] { }
   `;
   document.documentElement.appendChild(style);
@@ -580,6 +650,12 @@
       <div class="oel-search-row">
         <input type="text" id="oel-search-input" placeholder="Search OEL / manhwa / manhua on MangaDex…" />
         <button class="oel-btn" id="oel-search-btn">Search</button>
+      </div>
+      <div class="oel-search-row oel-adult-row">
+        <label class="oel-adult-toggle" title="Include titles rated erotica/pornographic in search results">
+          <input type="checkbox" id="oel-adult-cb" />
+          <span>Include adult titles</span>
+        </label>
       </div>
       <div class="oel-search-row oel-backup-row">
         <button class="oel-btn" id="oel-export-btn" title="Download your library as a JSON file">Export</button>
@@ -686,17 +762,26 @@
     }).join("");
   }
 
+  let searchToken = 0;
+
   function doSearch() {
     const q = searchInput.value.trim();
     if (!q) return;
+    const token = ++searchToken;
     resultsEl.innerHTML = `<div class="oel-empty">Searching…</div>`;
     searchSeries(q)
       .then((results) => {
+        if (token !== searchToken) return; // a newer search superseded this one
         lastResultsMap = new Map(results.map((s) => [String(s.id), s]));
         renderResults(results);
       })
       .catch((err) => {
+        if (token !== searchToken) return;
         console.error("[OEL Companion]", err);
+        if (err && err.contextInvalidated) {
+          resultsEl.innerHTML = `<div class="oel-empty">The extension was just updated. Refresh this page to keep using search.</div>`;
+          return;
+        }
         resultsEl.innerHTML = `<div class="oel-empty">Search failed: ${escapeHtml(err.message || String(err))}<br>Open the browser console (F12) for details.</div>`;
       });
   }
@@ -704,6 +789,16 @@
   searchBtn.addEventListener("click", doSearch);
   searchInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") doSearch();
+  });
+
+  const adultCb = card.querySelector("#oel-adult-cb");
+  chrome.storage.local.get({ [ADULT_KEY]: false }, (res) => {
+    includeAdult = res[ADULT_KEY] === true;
+    adultCb.checked = includeAdult;
+  });
+  adultCb.addEventListener("change", () => {
+    includeAdult = adultCb.checked;
+    chrome.storage.local.set({ [ADULT_KEY]: includeAdult });
   });
 
   card.addEventListener("click", (e) => {
@@ -1002,6 +1097,24 @@
     }
   }
 
+  // Last-resort home when the feed heuristic can't find a real feed (empty
+  // feed, non-English UI, or AniList changed their markup): pin the card to
+  // the top of the main content column instead of never showing it.
+  function placeCardFallback() {
+    if (card.isConnected) return;
+    const anchor =
+      document.querySelector("main, #main, .content, #content, .container") ||
+      document.body;
+    anchor.insertBefore(card, anchor.firstChild);
+    if (!fallbackWarned) {
+      fallbackWarned = true;
+      console.warn(
+        "[OEL Companion] couldn't locate the Activity feed — card placed at the top of the page. " +
+        "If your feed is empty this is expected."
+      );
+    }
+  }
+
   /* ------------------------------------------------------------------ *
    *  Cloned feed entries — only for titles with 1+ chapter logged
    * ------------------------------------------------------------------ */
@@ -1153,19 +1266,41 @@
     return clone;
   }
 
+  let injectAttempts = 0;
+  let fallbackWarned = false;
+  let lastInjectFingerprint = "";
+
   function injectIntoFeed() {
     const found = findFeed();
-    if (!found) return;
+    if (!found) {
+      // The feed may still be loading: retry a few times (the observer also
+      // re-schedules on every DOM change), then fall back instead of giving up.
+      injectAttempts++;
+      if (injectAttempts >= 10) placeCardFallback();
+      return;
+    }
+    injectAttempts = 0;
     const { list, sample } = found;
-
-    placeCard(list);
-
-    list.querySelectorAll(`[${FAKE_MARK}]`).forEach((el) => el.remove());
 
     const entries = library
       .filter((s) => ensureTrack(s).chapterTo > 0) // only titles with 1+ chapter logged
       .sort((a, b) => (ensureTrack(b).updatedAt || 0) - (ensureTrack(a).updatedAt || 0))
       .slice(0, 5);
+
+    // Skip the full rebuild when nothing about the injected set changed —
+    // this avoids remove/re-insert flicker on every busy-page DOM change
+    // (scroll-triggered re-renders that don't touch our feed at all).
+    const fp = entries.map((s) => `${s.id}:${ensureTrack(s).updatedAt || 0}`).join("|");
+    const alreadyInjected = list.querySelectorAll(`[${FAKE_MARK}]`).length;
+    if (fp === lastInjectFingerprint && alreadyInjected === entries.length) {
+      placeCard(list);
+      return;
+    }
+    lastInjectFingerprint = fp;
+
+    placeCard(list);
+
+    list.querySelectorAll(`[${FAKE_MARK}]`).forEach((el) => el.remove());
 
     entries.forEach((series) => {
       const fake = buildFakeEntry(sample, series, ensureTrack(series));
