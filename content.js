@@ -378,10 +378,10 @@
 
   /* ------------------------------------------------------------------ *
    *  Cover fallback — when MangaDex has no cover, grab a poster from
-   *  Comick, then MangaBaka. Matches by title similarity and caches the
-   *  resolved URL into the series object (persisted for library items).
+   *  MangaBaka. Matches by title similarity and caches the resolved URL
+   *  into the series object (persisted for library items).
    * ------------------------------------------------------------------ */
-  const MANGABAKA_API = "https://api.mangabaka.dev/v1";
+  const MANGABAKA_API = "https://api.mangabaka.org/v1";
   const coverLookupPending = new Set();
   const coverLookupDone = new Set();
 
@@ -459,39 +459,6 @@
     return fileName ? `${COVER_BASE}${series.id}/${fileName}.256.jpg` : "";
   }
 
-  const COMICK_HEADERS = {
-    "Referer": "https://comick.dev/",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-  };
-
-  async function fallbackCoverFromComick(title) {
-    // Comick's own API hosts (api.comick.io / api.comick.fun) redirect or are
-    // gone; a public proxy that mirrors the same /v1.0/search schema is the
-    // live source. Tried first, MangaBaka still catches anything it misses.
-    for (const host of ["https://comick-api-proxy.notaspider.dev/api/v1.0/search"]) {
-      try {
-        const json = await apiGetUrl(`${host}?q=${encodeURIComponent(title)}&limit=15`, COMICK_HEADERS);
-        if (!Array.isArray(json)) continue;
-        let best = null;
-        let bestScore = 0;
-        for (const item of json) {
-          const t = (item && (item.title || item.slug)) || "";
-          const s = titleScore(title, t);
-          if (s > bestScore) {
-            bestScore = s;
-            best = item;
-          }
-        }
-        if (!best || bestScore < 0.4) continue;
-        const b2 = best.md_covers && best.md_covers[0] && best.md_covers[0].b2key;
-        if (b2) return `https://meo.comick.pictures${String(b2).startsWith("/") ? b2 : "/" + b2}`;
-      } catch (e) {
-        // fall through to MangaBaka
-      }
-    }
-    return "";
-  }
-
   async function fallbackCoverFromMangabaka(title) {
     const json = await apiGetUrl(`${MANGABAKA_API}/series/search?q=${encodeURIComponent(title)}&limit=15`);
     const data = json && Array.isArray(json.data) ? json.data : [];
@@ -516,7 +483,6 @@
     coverLookupPending.add(key);
     try {
       let url = await fallbackCoverFromMangadex(series);
-      if (!url) url = await fallbackCoverFromComick(series.title || "");
       if (!url) url = await fallbackCoverFromMangabaka(series.title || "");
       if (url) {
         series.cover = url;

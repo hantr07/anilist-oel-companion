@@ -7,10 +7,8 @@
   "host_permissions": [
     "https://api.mangadex.org/*",
     "https://uploads.mangadex.org/*",
-    "https://meo.comick.pictures/*",
     "https://anilist.co/*",
-    "https://comick-api-proxy.notaspider.dev/*",
-    "https://api.mangabaka.dev/*"
+    "https://api.mangabaka.org/*"
   ],
   "declarative_net_request": {
     "rule_resources": [
